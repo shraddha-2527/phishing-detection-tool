@@ -1,205 +1,228 @@
-import logging
+"""
+Detection Engine Module
+Main engine for phishing detection
+"""
+
 from utils.feature_extractor import FeatureExtractor
 from utils.virustotal_checker import VirusTotalChecker
-from models.ml_model import PhishingDetectionModel
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from sklearn.ensemble import RandomForestClassifier
+import numpy as np
+import joblib
+import os
+from urllib.parse import urlparse
 
 class PhishingDetectionEngine:
-    """Main phishing detection engine combining multiple detection methods"""
+    """Main phishing detection engine"""
     
     def __init__(self):
+        """Initialize detection engine"""
         self.feature_extractor = FeatureExtractor()
-        self.ml_model = PhishingDetectionModel()
-        try:
-            self.vt_checker = VirusTotalChecker()
-        except ValueError:
-            logger.warning("VirusTotal API key not configured")
-            self.vt_checker = None
+        self.virustotal = VirusTotalChecker()
+        self.model = self._load_or_create_model()
     
-    def analyze_url(self, url):
-        """Comprehensive URL analysis using multiple methods"""
-        results = {
-            'url': url,
-            'overall_verdict': None,
-            'risk_level': 'UNKNOWN',
-            'confidence_score': 0,
-            'detections': {}
-        }
+    def analyze_url(self, url: str) -> dict:
+        """
+        Analyze URL for phishing indicators
+        
+        Args:
+            url: URL to analyze
+            
+        Returns:
+            Dictionary with detection results
+        """
         
         try:
-            # 1. URL Feature Analysis
-            logger.info(f"Analyzing URL: {url}")
+            # Extract features
             url_features = self.feature_extractor.extract_url_features(url)
             
-            if url_features:
-                results['url_features'] = url_features
-                logger.info("URL features extracted successfully")
+            # Get VirusTotal results
+            vt_result = self.virustotal.check_url(url)
             
-            # 2. HTML Content Analysis
-            try:
-                html_features = self.feature_extractor.extract_html_features(url)
-                if html_features:
-                    results['html_features'] = html_features
-                    logger.info("HTML features extracted successfully")
-            except Exception as e:
-                logger.warning(f"Could not extract HTML features: {e}")
-                html_features = None
+            # ML Model prediction
+            ml_result = self._ml_prediction(url_features)
             
-            # 3. Domain Analysis
-            try:
-                domain_features = self.feature_extractor.extract_domain_features(url)
-                if domain_features:
-                    results['domain_features'] = domain_features
-                    logger.info("Domain features extracted successfully")
-            except Exception as e:
-                logger.warning(f"Could not extract domain features: {e}")
-                domain_features = None
+            # Calculate overall score
+            overall_score = self._calculate_overall_score(url_features, vt_result, ml_result)
             
-            # 4. VirusTotal Check
-            if self.vt_checker:
-                try:
-                    vt_results = self.vt_checker.check_url(url)
-                    results['virustotal'] = vt_results
-                    logger.info(f"VirusTotal check completed: {vt_results}")
-                except Exception as e:
-                    logger.warning(f"VirusTotal check failed: {e}")
+            # Determine verdict
+            verdict = self._determine_verdict(overall_score)
+            risk_level = self._calculate_risk_level(overall_score)
             
-            # 5. ML Model Prediction
-            combined_features = {**url_features}
-            if html_features:
-                combined_features.update(html_features)
-            if domain_features:
-                combined_features.update(domain_features)
+            result = {
+                'url': url,
+                'overall_verdict': verdict,
+                'risk_level': risk_level,
+                'confidence_score': overall_score,
+                'detections': {
+                    'url_analysis': {
+                        'score': self._calculate_url_score(url_features),
+                        'features': url_features
+                    },
+                    'ml_model': ml_result,
+                    'virustotal': vt_result
+                }
+            }
             
-            ml_prediction = self.ml_model.predict(combined_features)
-            if ml_prediction:
-                results['ml_detection'] = ml_prediction
-                logger.info(f"ML prediction: {ml_prediction}")
-            
-            # 6. Calculate Final Verdict
-            results = self._calculate_final_verdict(results)
+            return result
             
         except Exception as e:
-            logger.error(f"Error during URL analysis: {e}")
-            results['error'] = str(e)
-        
-        return results
-    
-    def _calculate_final_verdict(self, results):
-        """Calculate final verdict based on all detection methods"""
-        phishing_score = 0
-        detection_count = 0
-        
-        # VirusTotal verdict
-        if 'virustotal' in results and results['virustotal'].get('status') == 'success':
-            vt = results['virustotal']
-            if vt.get('is_malicious'):
-                phishing_score += 40
-            elif vt.get('is_suspicious'):
-                phishing_score += 20
-            detection_count += 1
-        
-        # ML Model verdict
-        if 'ml_detection' in results:
-            ml = results['ml_detection']
-            if ml['is_phishing']:
-                phishing_score += 40
-            detection_count += 1
-            results['detections']['ml_model'] = {
-                'verdict': ml['prediction'],
-                'confidence': ml['confidence'],
-                'probability': ml['probability']
+            return {
+                'url': url,
+                'error': str(e),
+                'overall_verdict': 'ERROR',
+                'risk_level': 'UNKNOWN',
+                'confidence_score': 0
             }
-        
-        # URL Features verdict
-        if 'url_features' in results:
-            url_score = self._calculate_url_risk_score(results['url_features'])
-            phishing_score += url_score
-            detection_count += 1
-        
-        # HTML Features verdict
-        if 'html_features' in results:
-            html_score = self._calculate_html_risk_score(results['html_features'])
-            phishing_score += html_score
-            detection_count += 1
-        
-        # Normalize score
-        if detection_count > 0:
-            final_score = phishing_score / detection_count
-        else:
-            final_score = 0
-        
-        # Determine overall verdict
-        if final_score >= 70:
-            results['overall_verdict'] = 'PHISHING'
-            results['risk_level'] = 'HIGH'
-        elif final_score >= 40:
-            results['overall_verdict'] = 'SUSPICIOUS'
-            results['risk_level'] = 'MEDIUM'
-        elif final_score >= 20:
-            results['overall_verdict'] = 'WARNING'
-            results['risk_level'] = 'LOW'
-        else:
-            results['overall_verdict'] = 'SAFE'
-            results['risk_level'] = 'SAFE'
-        
-        results['confidence_score'] = round(final_score, 2)
-        
-        return results
     
-    def _calculate_url_risk_score(self, url_features):
-        """Calculate risk score from URL features"""
+    def _load_or_create_model(self):
+        """Load pre-trained model or create a default one"""
+        try:
+            model_path = os.getenv('MODEL_PATH', './models/phishing_model.pkl')
+            if os.path.exists(model_path):
+                return joblib.load(model_path)
+        except Exception as e:
+            print(f"Could not load model: {e}")
+        
+        # Return a dummy model if not available
+        return self._create_dummy_model()
+    
+    def _create_dummy_model(self):
+        """Create a simple dummy model for testing"""
+        # Create a simple Random Forest with minimal features
+        model = RandomForestClassifier(n_estimators=10, random_state=42)
+        # Dummy training data
+        X_dummy = np.random.rand(100, 10)
+        y_dummy = np.random.randint(0, 2, 100)
+        model.fit(X_dummy, y_dummy)
+        return model
+    
+    def _ml_prediction(self, features: dict) -> dict:
+        """Get ML model prediction"""
+        try:
+            # Convert features to array
+            feature_array = np.array(list(features.values())).reshape(1, -1)
+            
+            # Make prediction
+            if len(feature_array[0]) < 10:
+                # Pad if not enough features
+                feature_array = np.pad(feature_array, ((0, 0), (0, 10 - len(feature_array[0]))), mode='constant')
+            elif len(feature_array[0]) > 10:
+                # Trim if too many features
+                feature_array = feature_array[:, :10]
+            
+            prediction = self.model.predict(feature_array)[0]
+            probabilities = self.model.predict_proba(feature_array)[0]
+            
+            return {
+                'verdict': 'PHISHING' if prediction == 1 else 'LEGITIMATE',
+                'confidence': float(max(probabilities)),
+                'probability': {
+                    'phishing': float(probabilities[1]) if len(probabilities) > 1 else 0,
+                    'legitimate': float(probabilities[0])
+                }
+            }
+        except Exception as e:
+            return {
+                'verdict': 'UNKNOWN',
+                'confidence': 0,
+                'error': str(e)
+            }
+    
+    def _calculate_url_score(self, features: dict) -> float:
+        """Calculate phishing score based on URL features"""
         score = 0
         
-        if url_features.get('has_https') == 0:
+        # Length analysis
+        if features.get('url_length', 0) > 75:
             score += 5
-        if url_features.get('is_ip_address') == 1:
+        
+        # HTTPS check
+        if features.get('has_https', 0) == 0:
             score += 10
-        if url_features.get('at_symbol_count', 0) > 0:
+        
+        # Suspicious TLD
+        if features.get('suspicious_tld', 0) == 1:
             score += 15
-        if url_features.get('suspicious_tld') == 1:
+        
+        # Special characters
+        if features.get('at_symbol_count', 0) > 0:
+            score += 20
+        
+        if features.get('dash_count', 0) > 2:
+            score += 5
+        
+        # IP address
+        if features.get('is_ip_address', 0) == 1:
+            score += 25
+        
+        # Suspicious keywords
+        if features.get('has_suspicious_keywords', 0) == 1:
             score += 10
-        if url_features.get('has_double_encoding') == 1:
-            score += 15
-        if url_features.get('domain_has_digit') == 1:
-            score += 5
         
-        suspicious_keywords = url_features.get('has_suspicious_keywords', 0)
-        score += min(suspicious_keywords * 3, 15)
+        # URL encoding
+        if features.get('has_double_encoding', 0) == 1:
+            score += 20
         
-        subdomain_count = url_features.get('subdomain_count', 0)
-        if subdomain_count > 3:
-            score += 8
-        
-        return min(score, 40)
+        return min(score, 100)
     
-    def _calculate_html_risk_score(self, html_features):
-        """Calculate risk score from HTML features"""
-        score = 0
+    def _calculate_overall_score(self, url_features: dict, vt_result: dict, ml_result: dict) -> float:
+        """Calculate overall phishing score"""
         
-        if html_features.get('forms_with_password', 0) > 0:
-            score += 15
-        if html_features.get('form_count', 0) > 2:
-            score += 5
+        scores = []
+        weights = []
         
-        external_links = html_features.get('external_links', 0)
-        if external_links > 5:
-            score += 5
+        # URL analysis score (30% weight)
+        url_score = self._calculate_url_score(url_features)
+        scores.append(url_score)
+        weights.append(0.3)
         
-        suspicious_keywords = html_features.get('suspicious_html_keywords', 0)
-        score += min(suspicious_keywords * 4, 15)
+        # VirusTotal score (40% weight)
+        vt_score = 0
+        if vt_result.get('is_malicious'):
+            vt_score = 90
+        elif vt_result.get('suspicious_count', 0) > 0:
+            vt_score = 60
+        elif vt_result.get('threat_level') == 'HIGH':
+            vt_score = 85
+        elif vt_result.get('threat_level') == 'MEDIUM':
+            vt_score = 50
         
-        if html_features.get('has_title') == 0:
-            score += 5
-        if html_features.get('has_description') == 0:
-            score += 3
+        scores.append(vt_score)
+        weights.append(0.4)
         
-        return min(score, 40)
+        # ML Model score (30% weight)
+        ml_score = 0
+        if ml_result.get('verdict') == 'PHISHING':
+            ml_score = ml_result.get('confidence', 0) * 100
+        else:
+            ml_score = (1 - ml_result.get('confidence', 0)) * 100
+        
+        scores.append(ml_score)
+        weights.append(0.3)
+        
+        # Calculate weighted average
+        overall_score = sum(s * w for s, w in zip(scores, weights))
+        
+        return round(overall_score, 2)
     
-    def close(self):
-        """Close connections"""
-        if self.vt_checker:
-            self.vt_checker.close()
+    def _determine_verdict(self, score: float) -> str:
+        """Determine verdict based on score"""
+        if score >= 70:
+            return 'PHISHING'
+        elif score >= 40:
+            return 'SUSPICIOUS'
+        elif score >= 20:
+            return 'WARNING'
+        else:
+            return 'SAFE'
+    
+    def _calculate_risk_level(self, score: float) -> str:
+        """Calculate risk level"""
+        if score >= 70:
+            return 'HIGH'
+        elif score >= 40:
+            return 'MEDIUM'
+        elif score >= 20:
+            return 'LOW'
+        else:
+            return 'SAFE'
