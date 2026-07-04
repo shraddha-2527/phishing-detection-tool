@@ -1,3 +1,1 @@
-"""
-Initialize engine package
-"""
+"""Detection engine module"""

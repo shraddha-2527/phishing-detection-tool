@@ -1,3 +1,1 @@
-"""
-Initialize utils package
-"""
+"""Utility modules"""

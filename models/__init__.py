@@ -1,3 +1,1 @@
-"""
-Initialize models package
-"""
+"""ML models module"""

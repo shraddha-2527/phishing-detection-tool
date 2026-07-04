@@ -1,156 +1,229 @@
 """
-Feature Extractor Module
-Extracts features from URLs for phishing detection
+Feature Extraction for Phishing Detection
+Extracts relevant features from URLs for analysis
 """
 
+import logging
 import re
+import urllib.parse
 from urllib.parse import urlparse
-import tldextract
+from datetime import datetime
+import math
+import requests
+from bs4 import BeautifulSoup
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 class FeatureExtractor:
     """Extract features from URLs for phishing detection"""
     
     SUSPICIOUS_KEYWORDS = [
-        'login', 'signin', 'verify', 'account', 'update', 'confirm',
-        'click', 'bank', 'secure', 'password', 'check', 'validate'
+        'verify', 'confirm', 'update', 'login', 'signin', 'secure',
+        'account', 'click', 'urgent', 'suspend', 'confirm', 'validate',
+        'authenticate', 'paypal', 'amazon', 'apple', 'microsoft', 'google'
     ]
     
-    SUSPICIOUS_TLDS = [
-        'tk', 'ml', 'ga', 'cf', 'gq', 'tk', 'top', 'loan', 'download'
-    ]
+    URL_SHORTENERS = ['bit.ly', 'tinyurl.com', 'goo.gl', 'ow.ly', 'is.gd']
     
-    @staticmethod
-    def extract_url_features(url):
-        """Extract all URL features"""
-        features = {}
+    def extract_features(self, url):
+        """
+        Extract all relevant features from URL
         
+        Args:
+            url (str): URL to analyze
+            
+        Returns:
+            dict: Dictionary of extracted features
+        """
         try:
             parsed_url = urlparse(url)
-            domain = tldextract.extract(url)
             
-            # Basic URL features
-            features['url_length'] = len(url)
-            features['domain_length'] = len(domain.domain)
-            features['subdomain_count'] = len(domain.subdomain.split('.')) if domain.subdomain else 0
+            features = {
+                'url': url,
+                'url_length': len(url),
+                'has_ip_instead_of_domain': self._has_ip_address(url),
+                'uses_http_not_https': parsed_url.scheme == 'http',
+                'has_multiple_subdomains': self._count_subdomains(parsed_url.netloc) > 2,
+                'domain_age_days': self._get_domain_age(parsed_url.netloc),
+                'contains_suspicious_keywords': self._has_suspicious_keywords(url),
+                'has_double_encoding': self._has_double_encoding(url),
+                'has_url_shortener': self._is_shortener_url(parsed_url.netloc),
+                'special_char_count': self._count_special_chars(parsed_url.path),
+                'digit_percentage': self._calculate_digit_percentage(parsed_url.netloc),
+                'entropy_score': self._calculate_entropy(parsed_url.netloc),
+                'has_at_symbol': '@' in parsed_url.netloc,
+                'subdomain_count': self._count_subdomains(parsed_url.netloc),
+                'tld_length': self._get_tld_length(parsed_url.netloc),
+                'contains_hyphen_in_domain': '-' in parsed_url.netloc.split('/')[0],
+            }
             
-            # Protocol features
-            features['has_https'] = 1 if parsed_url.scheme == 'https' else 0
-            features['has_http'] = 1 if parsed_url.scheme == 'http' else 0
-            
-            # Special characters
-            features['dot_count'] = url.count('.')
-            features['dash_count'] = url.count('-')
-            features['underscore_count'] = url.count('_')
-            features['at_symbol_count'] = url.count('@')
-            features['double_slash_count'] = url.count('//')
-            
-            # TLD features
-            features['tld_length'] = len(domain.suffix)
-            features['suspicious_tld'] = 1 if domain.suffix in FeatureExtractor.SUSPICIOUS_TLDS else 0
-            
-            # IP address detection
-            features['is_ip_address'] = 1 if FeatureExtractor._is_ip_address(parsed_url.netloc) else 0
-            
-            # Suspicious keywords
-            url_lower = url.lower()
-            features['has_suspicious_keywords'] = 1 if any(kw in url_lower for kw in FeatureExtractor.SUSPICIOUS_KEYWORDS) else 0
-            
-            # Encoding features
-            features['has_url_encoding'] = 1 if '%' in url else 0
-            features['has_double_encoding'] = 1 if '%25' in url else 0
-            
-            # Query string features
-            features['has_query_string'] = 1 if parsed_url.query else 0
-            features['query_string_length'] = len(parsed_url.query) if parsed_url.query else 0
-            
-            # Port features
-            features['has_port'] = 1 if parsed_url.port else 0
-            
-            # Hostname features
-            hostname = parsed_url.netloc
-            features['hostname_length'] = len(hostname)
-            features['hostname_entropy'] = FeatureExtractor._calculate_entropy(hostname)
+            logger.debug(f"Extracted features: {features}")
+            return features
             
         except Exception as e:
-            print(f"Error extracting features: {e}")
-            features = {k: 0 for k in range(20)}  # Return zeros on error
+            logger.error(f"Error extracting features from {url}: {e}")
+            return self._get_default_features(url)
+    
+    def calculate_feature_risk(self, features):
+        """
+        Calculate risk score based on features (0-1)
         
-        return features
+        Args:
+            features (dict): Extracted features
+            
+        Returns:
+            float: Risk score between 0 and 1
+        """
+        risk_score = 0.0
+        
+        # URL length risk
+        if features.get('url_length', 0) > 100:
+            risk_score += 0.15
+        
+        # IP address instead of domain
+        if features.get('has_ip_instead_of_domain', False):
+            risk_score += 0.25
+        
+        # HTTP instead of HTTPS
+        if features.get('uses_http_not_https', False):
+            risk_score += 0.10
+        
+        # Multiple subdomains
+        if features.get('has_multiple_subdomains', False):
+            risk_score += 0.15
+        
+        # New domain (less than 30 days)
+        if features.get('domain_age_days', 365) < 30:
+            risk_score += 0.20
+        
+        # Suspicious keywords
+        if features.get('contains_suspicious_keywords', False):
+            risk_score += 0.15
+        
+        # Double encoding
+        if features.get('has_double_encoding', False):
+            risk_score += 0.20
+        
+        # URL shortener
+        if features.get('has_url_shortener', False):
+            risk_score += 0.15
+        
+        # @ symbol in domain
+        if features.get('has_at_symbol', False):
+            risk_score += 0.25
+        
+        # High entropy in domain
+        if features.get('entropy_score', 0) > 4.5:
+            risk_score += 0.10
+        
+        # Hyphen in domain
+        if features.get('contains_hyphen_in_domain', False):
+            risk_score += 0.05
+        
+        return min(risk_score, 1.0)  # Cap at 1.0
     
-    @staticmethod
-    def _is_ip_address(hostname):
-        """Check if hostname is an IP address"""
-        ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
-        return bool(re.match(ip_pattern, hostname))
+    def _has_ip_address(self, url):
+        """Check if URL uses IP address instead of domain"""
+        ip_pattern = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
+        return bool(re.search(ip_pattern, url))
     
-    @staticmethod
-    def _calculate_entropy(text):
-        """Calculate Shannon entropy of text"""
-        if not text:
+    def _count_subdomains(self, netloc):
+        """Count number of subdomains"""
+        return netloc.count('.')
+    
+    def _get_domain_age(self, domain):
+        """
+        Get domain age in days
+        
+        Args:
+            domain (str): Domain name
+            
+        Returns:
+            int: Age in days (default 365 if cannot determine)
+        """
+        try:
+            import whois
+            domain_clean = domain.split(':')[0]  # Remove port if present
+            whois_data = whois.whois(domain_clean)
+            
+            if whois_data and whois_data.creation_date:
+                if isinstance(whois_data.creation_date, list):
+                    creation_date = whois_data.creation_date[0]
+                else:
+                    creation_date = whois_data.creation_date
+                
+                age = (datetime.now() - creation_date).days
+                return max(age, 0)
+        except Exception as e:
+            logger.debug(f"Could not determine domain age for {domain}: {e}")
+        
+        return 365  # Default to 1 year if cannot determine
+    
+    def _has_suspicious_keywords(self, url):
+        """Check if URL contains suspicious keywords"""
+        url_lower = url.lower()
+        return any(keyword in url_lower for keyword in self.SUSPICIOUS_KEYWORDS)
+    
+    def _has_double_encoding(self, url):
+        """Check for double encoding in URL"""
+        return '%25' in url
+    
+    def _is_shortener_url(self, domain):
+        """Check if domain is a URL shortener"""
+        return any(shortener in domain for shortener in self.URL_SHORTENERS)
+    
+    def _count_special_chars(self, path):
+        """Count special characters in URL path"""
+        return len(re.findall(r'[^a-zA-Z0-9\-._~:/?#\[\]@!$&\'()*+,;=]', path))
+    
+    def _calculate_digit_percentage(self, domain):
+        """Calculate percentage of digits in domain"""
+        if not domain:
+            return 0
+        digits = sum(1 for c in domain if c.isdigit())
+        return (digits / len(domain)) * 100
+    
+    def _calculate_entropy(self, domain):
+        """
+        Calculate Shannon entropy of domain
+        Higher entropy can indicate randomness (suspicious)
+        """
+        if not domain:
             return 0
         
         entropy = 0
-        for char in set(text):
-            p = text.count(char) / len(text)
-            entropy -= p * (p ** 0.5)
+        for char in set(domain):
+            p = domain.count(char) / len(domain)
+            entropy -= p * math.log2(p)
+        
         return entropy
     
-    @staticmethod
-    def extract_html_features(html_content):
-        """Extract features from HTML content"""
-        features = {}
-        
-        try:
-            if not html_content:
-                return {f'html_feature_{i}': 0 for i in range(10)}
-            
-            html_lower = html_content.lower()
-            
-            # Form detection
-            features['has_form'] = 1 if '<form' in html_lower else 0
-            features['has_password_field'] = 1 if 'type="password"' in html_lower or "type='password'" in html_lower else 0
-            
-            # Link features
-            features['external_links_count'] = html_lower.count('<a ')
-            
-            # Suspicious keywords in HTML
-            features['has_login_form'] = 1 if 'login' in html_lower and '<form' in html_lower else 0
-            features['has_banking_keywords'] = 1 if any(kw in html_lower for kw in ['bank', 'account', 'password']) else 0
-            
-            # Meta tags
-            features['has_meta_refresh'] = 1 if '<meta' in html_lower and 'refresh' in html_lower else 0
-            
-            # JavaScript features
-            features['has_javascript'] = 1 if '<script' in html_lower else 0
-            
-            # Iframe features
-            features['has_iframe'] = 1 if '<iframe' in html_lower else 0
-            
-        except Exception as e:
-            print(f"Error extracting HTML features: {e}")
-            features = {f'html_feature_{i}': 0 for i in range(10)}
-        
-        return features
+    def _get_tld_length(self, domain):
+        """Get TLD length"""
+        parts = domain.split('.')
+        if len(parts) > 0:
+            return len(parts[-1])
+        return 0
     
-    @staticmethod
-    def extract_domain_features(domain):
-        """Extract domain-level features"""
-        features = {}
-        
-        try:
-            # Domain length
-            features['domain_length'] = len(domain)
-            
-            # Character frequency
-            features['digit_count'] = sum(1 for c in domain if c.isdigit())
-            features['letter_count'] = sum(1 for c in domain if c.isalpha())
-            
-            # Vowel ratio
-            vowels = sum(1 for c in domain.lower() if c in 'aeiou')
-            features['vowel_ratio'] = vowels / len(domain) if len(domain) > 0 else 0
-            
-        except Exception as e:
-            print(f"Error extracting domain features: {e}")
-            features = {'domain_length': 0, 'digit_count': 0, 'letter_count': 0, 'vowel_ratio': 0}
-        
-        return features
+    def _get_default_features(self, url):
+        """Return default/safe features"""
+        return {
+            'url': url,
+            'url_length': len(url),
+            'has_ip_instead_of_domain': False,
+            'uses_http_not_https': False,
+            'has_multiple_subdomains': False,
+            'domain_age_days': 365,
+            'contains_suspicious_keywords': False,
+            'has_double_encoding': False,
+            'has_url_shortener': False,
+            'special_char_count': 0,
+            'digit_percentage': 0,
+            'entropy_score': 0,
+            'has_at_symbol': False,
+            'subdomain_count': 1,
+            'tld_length': 3,
+            'contains_hyphen_in_domain': False,
+        }
